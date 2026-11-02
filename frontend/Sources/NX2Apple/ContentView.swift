@@ -13,101 +13,12 @@ import NXModel
 // symlinks is built and the script's --work-dir keeps the real build folder next to
 // the base game.
 
-// MARK: - Pieces
-
-struct Stage: Identifiable {
-    let id: Int          // k, the stage number in the script's own plan
-    var name: String
-    var state: StepState = .running
-    var detail: String = ""
-    var percent: Double? = nil
-    var started: Date? = nil   // when the stage began here: its clock runs while the count may stand still
-    var eta: Double? = nil     // the script's estimate of the seconds left, as of etaAt
-    var etaAt: Date? = nil
-
-    /// A stage's name in the launcher's language. The script names its stages in English (PROG.stage in
-    /// build_ipa_from_nsp.py): stage.<name> in the table, "extract <name>" and "<API> shader capture" with their
-    /// part kept; a name the table does not know (a newer script's) is shown as the script wrote it.
-    static func localizedName(_ name: String, _ t: (String) -> String) -> String {
-        func known(_ key: String) -> String? { let s = t(key); return s == key ? nil : s }
-        let key = "stage." + name.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: "_", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-        if let s = known(key) { return s }
-        if name.hasPrefix("extract "), let f = known("stage.extract") { return String(format: f, String(name.dropFirst("extract ".count))) }
-        if name.hasSuffix(" shader capture"), let f = known("stage.capture") { return String(format: f, String(name.dropLast(" shader capture".count))) }
-        return name
-    }
-
-    /// "3:42" since the stage began, then "1 min left" while the script's estimate, counted down from when it came,
-    /// lasts: the estimate only arrives with a new count, so one taken as it was would stand still with the count.
-    func clock(at now: Date, left: String) -> String {
-        var parts: [String] = []
-        if let started {
-            let t = max(0, Int(now.timeIntervalSince(started)))
-            parts.append(t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%d:%02d", t / 60, t % 60))
-        }
-        if let eta, let etaAt {
-            let remaining = eta - now.timeIntervalSince(etaAt)
-            if remaining >= 1 { parts.append(String(format: left, BuildModel.duration(remaining))) }
-        }
-        return parts.joined(separator: " · ")
-    }
-}
-
-enum StepState: Equatable {
-    case pending, running, done, failed
-    var icon: String {
-        switch self {
-        case .pending: return "circle"
-        case .running: return "spinner"
-        case .done: return "checkmark.circle.fill"
-        case .failed: return "xmark.octagon.fill"
-        }
-    }
-    var color: Color {
-        switch self {
-        case .pending: return .gray
-        case .running: return .yellow
-        case .done: return .green
-        case .failed: return .red
-        }
-    }
-}
-
-/// One of the four things the user points at.
-enum InputKind { case base, update, dlc, keys }
-
-struct Slot: Identifiable {
-    let id: String
-    let kind: InputKind
-    let title: String
-    let optional: Bool
-    var paths: [String] = []
-    var problem: String = ""
-    /// A finished sentence shown beside the file name (the update row: which of several updates was taken).
-    var note: String = ""
-    var ok: Bool { paths.contains { FileManager.default.fileExists(atPath: $0) } }
-    /// `problem` holds either a finished message or a key + arguments, resolved by the model
-    /// (it needs the current language, which a struct cannot read).
-    var problemText: String { problem }
-    func summary(_ t: (String) -> String) -> String {
-        if !problem.isEmpty { return problem.hasPrefix("data.") ? t(problem) : problem }
-        if paths.isEmpty {
-            if kind == .dlc { return t("data.notSelectedDlc") }
-            return optional ? t("data.notSelectedOptional") : t("data.notSelected")
-        }
-        if paths.count == 1 {
-            let name = (paths[0] as NSString).lastPathComponent
-            return note.isEmpty ? name : name + "\n" + note
-        }
-        return String(format: t("data.files"), paths.count) + paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
-    }
-}
-
 // MARK: - Model
 
 final class BuildModel: ObservableObject {
     @Published var gameDir = ""
+    @Published var multiGamePlan: MultiGamePlan? = nil
+    @Published var activeTitleID: String? = nil
     @Published var slots: [Slot] = [
         Slot(id: "base", kind: .base, title: "data.base", optional: false),
         Slot(id: "update", kind: .update, title: "data.update", optional: true),
@@ -1006,6 +917,8 @@ final class BuildModel: ObservableObject {
     /// Subfolders are scanned too — a dump usually arrives as 本体/ 更新/ DLC/ folders —
     /// pruning the build folders this pipeline itself writes so a rescan is not slow.
     func scan(folder: String) {
+        activeTitleID = nil
+        multiGamePlan = nil
         gameDir = folder
         let found = Self.classify(Self.inputFiles(in: folder))
         updateSlot("base") { $0.paths = found.base.map { [$0] } ?? []; $0.problem = found.base == nil ? "data.noBase" : "" }
@@ -1181,6 +1094,7 @@ final class BuildModel: ObservableObject {
     /// Files chosen for one row: those that fit it are taken, the first that does not is named on the row
     /// and left out (it is not moved to another row: the row the user chose stays as they set it).
     func take(picked: [String], kind: InputKind) {
+        if kind == .base { activeTitleID = nil; multiGamePlan = nil }
         let id = kind == .base ? "base" : kind == .update ? "update" : kind == .dlc ? "dlc" : "keys"
         let baseName = kind == .base ? nil : (basePath as NSString).lastPathComponent
         var fitting: [String] = [], problem = ""
@@ -1200,7 +1114,10 @@ final class BuildModel: ObservableObject {
         if kind == .base, let first = fitting.first { gameDir = (first as NSString).deletingLastPathComponent }
     }
 
-    func clear(_ id: String) { updateSlot(id) { $0.paths = []; $0.problem = "" } }
+    func clear(_ id: String) {
+        if id == "base" { activeTitleID = nil; multiGamePlan = nil }
+        updateSlot(id) { $0.paths = []; $0.problem = "" }
+    }
 
     /// The title ID in a file name: `[0100F2C0115B6000]` first, else a bare 16-digit ID that starts with 01 as a token
     /// (start of the name or after `_`, space, `-`, `.`, `(`, `[`). Only the file name counts, so a full path works and a folder named with an ID never
@@ -1304,7 +1221,7 @@ final class BuildModel: ObservableObject {
                 staged.append(baseDir + "/" + f)
             }
         }
-        let tidHex = Self.buildKey(basePath)
+        let tidHex = activeTitleID ?? Self.buildKey(basePath)
         let workDir = (outDir.isEmpty ? baseDir : outDir) + "/" + tidHex + "_build"
         // The build's signing step refuses the attributes a cloud folder adds, after the long steps: stop here instead.
         if cloudFolderCheck(workDir) {
@@ -1355,6 +1272,7 @@ final class BuildModel: ObservableObject {
         let engine = EngineLayout.root(repoPath)   // the checkout's engine/ (#214)
         var args = [engine + "/" + Self.buildScript, inputDir, "-k", keysPath,
                     "--progress", "json"]
+        if let tid = activeTitleID { args += ["--title-id", tid] }
         // A compatibility switch the player turned on: written to a small env file the pipeline
         // copies into the app bundle (main.m sets one variable per line at boot). Only for an iPhone or iPad build;
         // a Mac app runs on this Mac's GPU, which always has BC support.
@@ -1421,6 +1339,8 @@ final class BuildModel: ObservableObject {
                 self.flushLines()
                 if self.stopping {
                     self.stopping = false
+                    self.multiGamePlan = nil
+                    self.activeTitleID = nil
                     self.resetProgress()
                     self.doneNote = self.t("msg.stopped")
                     self.cleanupStaging()
@@ -1443,11 +1363,12 @@ final class BuildModel: ObservableObject {
                                 (self.macAppPath as NSString).deletingLastPathComponent +
                                 "/.nx2apple-library"))
                         }
+                        if made, self.advanceMultiGameBuild() { return }
                         self.running = false
                         self.cleanupStaging()
                     } else {
                         // The game's archive, then its framework into the one shared app on the device
-                        let tid = Self.buildKey(self.basePath)
+                        let tid = self.activeTitleID ?? Self.buildKey(self.basePath)
                         let name = ((self.basePath as NSString).lastPathComponent as NSString).deletingPathExtension
                         let fw = ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: tid)
                         self.packArchive(workDir: self.effectiveWorkDir) {
@@ -1455,6 +1376,9 @@ final class BuildModel: ObservableObject {
                         }
                     }
                 } else {
+                    if self.handleMultiGameDetectedIfNeeded() { return }
+                    self.multiGamePlan = nil
+                    self.activeTitleID = nil
                     if let i = self.stages.lastIndex(where: { $0.state == .running }) {
                         self.stages[i].state = .failed
                         self.stages[i].detail = String(format: self.t("msg.exitCode"), status.terminationStatus)
@@ -1672,12 +1596,12 @@ final class BuildModel: ObservableObject {
         Self.endGroup(proc.processIdentifier)   // the script and every tool it started
     }
 
-    private func cleanupStaging() {
+    func cleanupStaging() {
         staging = nil   // the folder stays for the next build of this game (#132, InputStaging)
     }
 
     /// A stopped build leaves no half-finished stages behind: the progress starts empty again.
-    private func resetProgress() { stages = []; logTail = ""; lineBuf = "" }
+    func resetProgress() { stages = []; logTail = ""; lineBuf = "" }
 
     private func markAllDone() { for i in stages.indices where stages[i].state != .failed { stages[i].state = .done } }
 
@@ -1694,7 +1618,7 @@ final class BuildModel: ObservableObject {
         return nil
     }
 
-    private func say(_ s: String) { append(s + "\n") }
+    func say(_ s: String) { append(s + "\n") }
     private func append(_ s: String) {
         logTail += s
         if logTail.count > 12000 { logTail = String(logTail.suffix(9000)) }
@@ -2080,6 +2004,7 @@ final class BuildModel: ObservableObject {
                 }
                 self.installedOn = device
                 self.installedAppPath = result.appPath
+                if self.advanceMultiGameBuild() { return }
                 self.finishInstall(nil, note: result.message)
             }
         }
@@ -2103,6 +2028,7 @@ final class BuildModel: ObservableObject {
     }
 
     private func finishInstall(_ failure: String?, note: String? = nil) {
+        if failure != nil { multiGamePlan = nil; activeTitleID = nil }
         running = false
         done = failure == nil
         doneNote = failure ?? note ?? String(format: t("dev.installed"), deviceName(installDevice))

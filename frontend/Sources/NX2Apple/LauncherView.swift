@@ -4,42 +4,6 @@ import NXCore
 import NXModel
 import NXLauncher
 
-enum LauncherPage: String, CaseIterable {
-    case library, builds, settings
-    var symbol: String {
-        switch self {
-        case .library: return "gamecontroller"
-        case .builds: return "shippingbox"
-        case .settings: return "slider.horizontal.3"
-        }
-    }
-}
-
-/// The library's filter: every game in the games folder, or only those with a build. Remembered between launches.
-enum LibraryFilter: String, CaseIterable, Identifiable {
-    case owned, built
-    var id: String { rawValue }
-    var labelKey: String { "filter." + rawValue }
-
-    /// Owned shows every game without reading its build, so the default filter costs nothing per card.
-    func includes(_ game: LibraryGame) -> Bool { self == .owned || game.isReady || game.hasIOSBuild }
-
-    static func load(_ defaults: UserDefaults = .standard) -> LibraryFilter {
-        LibraryFilter(rawValue: defaults.string(forKey: "libraryFilter") ?? "") ?? .owned
-    }
-    func save(_ defaults: UserDefaults = .standard) { defaults.set(rawValue, forKey: "libraryFilter") }
-
-    /// The selection and the controller's focus after a switch to this filter. A selected game the filter hides gives way to the
-    /// first one it shows, and a focus on a hidden card is dropped, so neither the hero nor the A button reaches a game that is not
-    /// on screen.
-    func reconcile(games: [LibraryGame], selectedID: UUID?, focused: String?) -> (selectedID: UUID?, focused: String?) {
-        let shown = games.filter(includes)
-        let selection = shown.contains { $0.id == selectedID } ? selectedID : shown.first?.id
-        guard let focused, focused.hasPrefix("card.") else { return (selection, focused) }
-        return (selection, shown.contains { "card." + $0.id.uuidString == focused } ? focused : nil)
-    }
-}
-
 struct ContentView: View {
     @StateObject private var m: BuildModel
     @ObservedObject private var loc: Localizer   // the strings: handed on to every view below through the environment
@@ -257,6 +221,9 @@ struct ContentView: View {
         }
         .onReceive(m.$done.removeDuplicates()) { done in
             if done { DispatchQueue.main.async { recordBuild() } }
+        }
+        .onChange(of: m.activeTitleID) { newTitle in
+            if newTitle != nil, m.running { activeBuildID = library.rememberInputs(m) }
         }
         .onChange(of: scenePhase) { phase in
             if phase == .active { library.objectWillChange.send() }
@@ -773,6 +740,8 @@ struct ContentView: View {
             m.slots[index].paths = game.inputs[m.slots[index].id] ?? []
             m.slots[index].problem = ""
         }
+        m.activeTitleID = game.titleID.count == 16 && UInt64(game.titleID, radix: 16) != nil ? game.titleID : nil
+        m.multiGamePlan = nil
         // The folder the game's files were found in (a base package may sit one level down in its own folder) — from the
         // scan, or from the last build. Falling back to the base's folder would put the update and DLC out of reach.
         m.gameDir = game.sourceFolder.isEmpty ? (m.basePath as NSString).deletingLastPathComponent : game.sourceFolder

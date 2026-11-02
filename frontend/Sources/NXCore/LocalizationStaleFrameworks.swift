@@ -4,8 +4,13 @@ import Foundation
 // hold. Localization.swift is above the size limit and may only shrink, so a new feature's strings live in their own file.
 extension L10n {
     package static func extra(_ key: String, _ lang: Lang) -> String {
-        guard let row = staleFrameworks[key] else { return key }
-        return row[lang] ?? row[.en] ?? key
+        if let row = staleFrameworks[key] {
+            return row[lang] ?? row[.en] ?? key
+        }
+        if let text = multiGameString(key, lang) {
+            return text
+        }
+        return key
     }
 
     private static let staleFrameworks: [String: [Lang: String]] = [

@@ -492,9 +492,19 @@ final class GameLibrary: ObservableObject {
 
     @discardableResult func rememberInputs(_ model: BuildModel) -> UUID? {
         guard !model.basePath.isEmpty else { return nil }
-        let titleID = BuildModel.titleID(model.basePath).map { String(format: "%016llX", $0) }
+        let rawID = BuildModel.titleID(model.basePath).map { String(format: "%016llX", $0) }
             ?? URL(fileURLWithPath: model.basePath).standardizedFileURL.path
-        var game = games.first { $0.titleID == titleID } ?? LibraryGame(titleID: titleID, name: Self.title(for: model.basePath, repo: model.repoPath, titleID: titleID))
+        let titleID = model.activeTitleID ?? rawID
+        var game: LibraryGame
+        if let existing = games.first(where: { $0.titleID == titleID }) {
+            game = existing
+        } else if model.activeTitleID != nil, let pathEntry = games.first(where: { $0.titleID == rawID && $0.titleID.hasPrefix("/") }) {
+            game = pathEntry
+            game.titleID = titleID
+            game.name = Self.title(for: model.basePath, repo: model.repoPath, titleID: titleID)
+        } else {
+            game = LibraryGame(titleID: titleID, name: Self.title(for: model.basePath, repo: model.repoPath, titleID: titleID))
+        }
         game.inputs = Dictionary(uniqueKeysWithValues: model.slots.map { ($0.id, $0.paths) })
         game.outputDirectory = model.outDir
         if !model.gameDir.isEmpty { game.sourceFolder = model.gameDir }
